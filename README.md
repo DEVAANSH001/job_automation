@@ -19,6 +19,53 @@ The service is deliberately split into an automated, repeatable pipeline with gu
 
 This is not a scraper for every job on the internet or a universal application bot. It automates the specified boards and only automates applications for forms whose exact adapter has been tested.
 
+## Complete build inventory
+
+| Area | What is built |
+| --- | --- |
+| Service | A Python 3.12 FastAPI service with one in-process asynchronous worker. It runs a cycle at startup and thereafter using `interval_minutes`; a lock prevents overlapping cycles. |
+| Job sources | Greenhouse, Lever, and Ashby public job-board collectors. Each listing receives a stable ID derived from source, board, and source job ID, so later refreshes update rather than duplicate it. |
+| Selection | Configurable role, location, exclusion-title, minimum-score, and explicit-years-of-experience rules. Existing jobs are re-scored whenever the configuration changes. |
+| Resume generator | ReportLab PDF generation from verified profile facts: contact details, links, skills, experience, education, projects, and achievements. Relevant skills and bullets are reordered, while original claims remain unchanged. |
+| Application runner | A Playwright/Chromium runner for explicitly tested, host-specific, single-page HTML forms. It supports `fill`, `select`, boolean `check`, and resume `upload` steps. |
+| Review workflow | Jobs move through `discovered`, `filtered`, `needs_profile`, `prepared`, `applying`, `applied`, `needs_review`, `submission_uncertain`, and `error` states as appropriate. Unsubmitted review/error jobs can be explicitly re-queued. |
+| Data and reports | SQLite database in WAL mode for jobs and events; PDF resumes and application screenshots on disk; formatted Excel workbook with filterable Jobs and Activity sheets. Text is stored as text to prevent formula injection in Excel exports. |
+| Local operation | PowerShell setup, startup, status, on-demand run, and Excel-download scripts. The local server only listens on `127.0.0.1`. |
+| Deployment | Dockerfile that installs Chromium and its dependencies, plus Compose deployment with loopback-only port publishing, persistent data volume, read-only configuration mount, restart policy, init process, and shared-memory allocation for the browser. |
+| Testing | Pytest coverage for deduplication, re-scoring, filters, Excel formula safety, truthful resume PDFs, missing adapters, daily limits, and bearer-token API access. |
+
+### API
+
+Every endpoint requires `Authorization: Bearer <API_TOKEN>` (at least 24 characters).
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /health` | Confirm the service is running. |
+| `GET /jobs` | Return the stored jobs, ordered by score and discovery time. |
+| `POST /run` | Start an immediate collection, scoring, preparation, optional application, and export cycle. |
+| `GET /excel` | Download the most recent `jobs.xlsx` report. |
+| `POST /jobs/{job_id}/retry` | Re-queue an unsubmitted `needs_profile`, `needs_review`, or `error` job after correction. Applied, applying, and uncertain submissions are intentionally excluded. |
+
+### Included utilities
+
+- `setup-local.ps1` creates the local virtual environment, installs locked dependencies, and creates `config.json` from the safe example when needed.
+- `start-local.ps1` validates prerequisites, generates a random local bearer token on first run, and launches Uvicorn.
+- `jobbot-local.ps1` provides `status`, `run`, and `excel` commands against the local protected API.
+- `seed_boards.py` is an optional development helper that checks a small set of Greenhouse board slugs and writes reachable boards to the local configuration.
+- `import_profile.py` is a one-time local helper for importing verified profile information into `config.json`. It is intentionally ignored by Git along with personal configuration and generated data.
+
+### Configuration surface
+
+`config.example.json` documents the supported settings:
+
+- `interval_minutes`, `minimum_score`, `max_required_years`, and `daily_limit`
+- `roles`, `locations`, and `exclude_titles`
+- target `boards` for Greenhouse, Lever, and Ashby
+- verified `profile` fields, experience, education, skills, projects, achievements, and approved form answers
+- `auto_submit` and per-host `application_adapters`
+
+Keep `config.json`, `.local-token`, `.env`, local databases, screenshots, generated PDFs, and Excel exports private. They are excluded from version control by `.gitignore`.
+
 ## Run locally on Windows
 
 From PowerShell in this folder:
