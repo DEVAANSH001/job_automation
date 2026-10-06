@@ -1,0 +1,23 @@
+{
+  "interval_minutes": 360,
+  "roles": ["python developer", "backend engineer"],
+  "locations": ["India", "Remote"],
+  "exclude_titles": ["principal", "staff", "director"],
+  "minimum_score": 50,
+  "max_required_years": 2,
+  "auto_submit": false,
+  "daily_limit": 5,
+  "boards": [],
+  "profile": {
+    "name": "",
+    "email": "",
+    "phone": "",
+    "location": "",
+    "summary": "",
+    "skills": [],
+    "experience": [],
+    "education": [],
+    "answers": {}
+  },
+  "application_adapters": {}
+}

@@ -1,0 +1,9 @@
+.env
+data/
+config.json
+__pycache__/
+.pytest_cache/
+.venv/
+import_profile.py
+.local-token
+jobs.xlsx
