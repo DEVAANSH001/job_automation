@@ -83,29 +83,20 @@ def collect(board):
 
 
 def score(job, cfg):
-    title = job['title'].lower()
-    if any(x.lower() in title for x in cfg.get('exclude_titles', [])):
-        return 0
-    roles = cfg.get('roles', [])
-    locations = cfg.get('locations', [])
-    if roles and not any(x.lower() in title for x in roles):
-        return 0
-    if locations and not any(x.lower() in job['location'].lower() for x in locations):
-        return 0
-    max_years = cfg.get('max_required_years')
-    if max_years is not None:
-        description = job['description'].lower()
-        patterns = [
-            r'(\d+)\s*(?:\+|[-\u2013\u2014\ufffd]\s*\d+)?\s*years?\s+of\s+(?:professional\s+|industry\s+|commercial\s+)?(?:software\s+)?(?:engineering\s+|development\s+)?experience',
-            r'(\d+)\s*(?:\+|[-\u2013\u2014\ufffd]\s*\d+)?\s*years?\s+(?:of\s+)?experience',
-            r'(?:professional\s+|industry\s+|commercial\s+)?(?:software\s+)?(?:engineering\s+|development\s+)?experience.{0,35}?(\d+)\s*(?:\+|[-\u2013\u2014\ufffd]\s*\d+)?\s*years?',
-        ]
-        required = [int(value) for pattern in patterns for value in re.findall(pattern, description)]
-        if required and min(required) > int(max_years):
-            return 0
-    skills = cfg['profile'].get('skills', [])
-    matched = sum(x.lower() in job['description'].lower() for x in skills)
-    return 50 + round(50 * matched / len(skills)) if skills else 50
+    from jobbot.matcher import score_job
+    rating, _ = score_job(job, cfg)
+    return rating
+
+
+def ingest_job(job, cfg):
+    from jobbot.matcher import score_job
+    rating, reason = score_job(job, cfg)
+    timestamp = now()
+    with db() as conn:
+        conn.execute(
+            'INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,location=excluded.location,url=excluded.url,description=excluded.description,score=excluded.score,updated=excluded.updated,note=CASE WHEN jobs.status="discovered" THEN excluded.note ELSE jobs.note END',
+            (*[job[k] for k in ['id','source','company','title','location','url','description']], rating, 'discovered', '', timestamp, timestamp, '', reason)
+        )
 
 
 def update(job_id, **fields):
@@ -205,29 +196,69 @@ def run():
         return {'status': 'already_running'}
     try:
         cfg = config()
+        # 1. Company ATS Boards (Greenhouse, Lever, Ashby)
         for board in cfg.get('boards', []):
             try:
                 for job in collect(board):
-                    rating = score(job, cfg)
-                    timestamp = now()
-                    with db() as conn:
-                        conn.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,location=excluded.location,url=excluded.url,description=excluded.description,score=excluded.score,updated=excluded.updated',
-                                     (*[job[k] for k in ['id','source','company','title','location','url','description']], rating, 'discovered', '', timestamp, timestamp, '', ''))
+                    ingest_job(job, cfg)
                 event('', 'collection_ok', f'{board["source"]}:{board["slug"]}')
             except Exception as exc:
                 event('', 'collection_error', f'{board.get("slug")}: {type(exc).__name__}')
+
+        # 2. Multi-Board JobSpy (LinkedIn, Indeed, Glassdoor, ZipRecruiter)
+        if cfg.get('scrapers', {}).get('jobspy', {}).get('enabled'):
+            try:
+                from jobbot.scrapers.jobspy_scraper import collect_jobspy
+                jobspy_count = 0
+                for job in collect_jobspy(cfg):
+                    ingest_job(job, cfg)
+                    jobspy_count += 1
+                event('', 'jobspy_ok', f'Collected {jobspy_count} listings')
+            except Exception as exc:
+                event('', 'jobspy_error', type(exc).__name__)
+
+        # 3. Dynamic AI Scrapers (Playwright)
+        if cfg.get('scrapers', {}).get('ai_scrapers', {}).get('enabled'):
+            try:
+                from jobbot.scrapers.ai_scraper import collect_ai_scrapers
+                ai_count = 0
+                for job in collect_ai_scrapers(cfg):
+                    ingest_job(job, cfg)
+                    ai_count += 1
+                event('', 'ai_scrapers_ok', f'Collected {ai_count} listings')
+            except Exception as exc:
+                event('', 'ai_scrapers_error', type(exc).__name__)
+
+        # 4. Tech Feeds (RemoteOK, Arbeitnow)
+        if cfg.get('scrapers', {}).get('tech_feeds', {}).get('enabled'):
+            try:
+                from jobbot.scrapers.tech_feeds import collect_tech_feeds
+                feed_count = 0
+                for job in collect_tech_feeds(cfg):
+                    ingest_job(job, cfg)
+                    feed_count += 1
+                event('', 'tech_feeds_ok', f'Collected {feed_count} listings')
+            except Exception as exc:
+                event('', 'tech_feeds_error', type(exc).__name__)
+
         current_jobs = rows()
-        rescored = [(score(job, cfg), job['id']) for job in current_jobs]
+        from jobbot.matcher import score_job
+        rescored = []
+        for job in current_jobs:
+            rating, reason = score_job(job, cfg)
+            rescored.append((rating, reason, job['id']))
         with db() as conn:
-            conn.executemany('UPDATE jobs SET score=? WHERE id=?', rescored)
-        for job, (rating, _) in zip(current_jobs, rescored):
+            conn.executemany('UPDATE jobs SET score=? WHERE id=?', [(r[0], r[2]) for r in rescored])
+        for job, (rating, reason, _) in zip(current_jobs, rescored):
             job['score'] = rating
             if job['score'] == 0 and job['status'] in ('discovered', 'prepared', 'needs_profile', 'filtered'):
-                update(job['id'], status='filtered', note='Outside configured title, location, or experience rules')
+                update(job['id'], status='filtered', note=reason or 'Outside configured title, location, or experience rules')
                 continue
             if job['score'] > 0 and job['status'] == 'filtered':
-                update(job['id'], status='discovered', note='')
+                update(job['id'], status='discovered', note=reason)
                 job['status'] = 'discovered'
+            elif job['status'] == 'discovered' and reason:
+                update(job['id'], note=reason)
             if job['status'] in ('discovered', 'needs_profile') and job['score'] >= cfg.get('minimum_score', 50) and job['score'] > 0:
                 try:
                     prepare(job, cfg)

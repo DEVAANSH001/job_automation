@@ -1,15 +1,20 @@
-# Job automation for EC2
+# Job automation for EC2 & Local
 
-Python/FastAPI service: Greenhouse, Lever and Ashby job collection; configurable title/location filters; keyword scoring; truthful resume PDFs; configurable Playwright application forms; SQLite history and Excel export with an Activity sheet. The worker runs at startup and periodically. Run one service instance with one Uvicorn worker.
+Python/FastAPI service: Multi-source AI job scrapers (JobSpy across LinkedIn, Indeed, Glassdoor, ZipRecruiter; Playwright AI web scrapers; RemoteOK/Arbeitnow feeds; and Greenhouse, Lever, Ashby ATS APIs); resume-first query generation and multi-factor relevance scoring; truthful tailored resume PDFs; configurable Playwright application forms; SQLite history and Excel export with an Activity sheet. The worker runs at startup and periodically.
 
 ## What is automated
 
-The service is deliberately split into an automated, repeatable pipeline with guardrails around anything that could submit an application:
+The service runs an automated, repeatable pipeline with guardrails around anything that could submit an application:
 
-- **Job-board collection:** pulls live listings from the Greenhouse, Lever, and Ashby public job-board APIs for the company boards listed in `config.json`.
+- **Multi-source AI job collection:**
+  - **JobSpy aggregator:** scrapes live openings across **LinkedIn**, **Indeed**, **Glassdoor**, and **ZipRecruiter** using resume-derived queries and location preferences.
+  - **Playwright AI web scrapers:** scrapes dynamic JavaScript-rendered career portals and startup hubs with DOM heuristic extraction and optional Gemini/LLM schema extraction.
+  - **Live tech feeds:** pulls fresh developer listings from **RemoteOK** and **Arbeitnow**.
+  - **ATS board collectors:** collects listings from Greenhouse, Lever, and Ashby public board APIs configured in `config.json`.
+- **Resume-first search queries:** automatically synthesizes targeted search queries from your verified profile stack (e.g., target roles, tech stack combinations like Python/FastAPI or React/Next.js).
 - **Scheduled refreshes:** starts a collection cycle when the API starts, then repeats at the configurable `interval_minutes` cadence (minimum five minutes). A manual `POST /run` or `jobbot-local.ps1 run` starts a cycle on demand.
-- **Filtering:** removes listings outside the configured role titles, locations, excluded titles, or maximum explicitly required years of experience.
-- **Relevance scoring:** scores retained listings against skills in the verified profile and only prepares jobs at or above `minimum_score`.
+- **Filtering & guardrails:** removes listings outside the configured role titles, locations, excluded titles, or maximum explicitly required years of experience.
+- **Multi-factor resume relevance scoring:** scores listings based on seniority fit (boosting internships/entry-level/fresher roles), core stack synergy against verified skills and project domains, logging match rationales for each job. Only prepares jobs at or above `minimum_score`.
 - **Truthful resume preparation:** generates a job-specific PDF by reordering existing skills and verified experience bullets for relevance; it never invents or rewrites claims.
 - **Application queue and audit trail:** persists jobs, statuses, timestamps, notes, and collection/application events in SQLite, so repeated runs update the same job rather than duplicating it.
 - **Excel reporting:** regenerates `jobs.xlsx` on every cycle with a Jobs sheet and an Activity sheet, ready to download through `/excel` or `jobbot-local.ps1 excel`.
@@ -17,22 +22,20 @@ The service is deliberately split into an automated, repeatable pipeline with gu
 - **Submission safeguards:** auto-submit is off by default; each host needs a tested adapter, requests are restricted to approved hosts, CAPTCHA and unsupported flows pause for review, screenshots are saved before/after submission, and a daily attempt limit is enforced. Interrupted or unconfirmed submissions are marked uncertain and are never automatically retried.
 - **Protected local/EC2 operation:** the API requires a bearer token and binds to loopback only. Docker uses a persistent volume for job history, PDFs, screenshots, and exports.
 
-This is not a scraper for every job on the internet or a universal application bot. It automates the specified boards and only automates applications for forms whose exact adapter has been tested.
-
 ## Complete build inventory
 
 | Area | What is built |
 | --- | --- |
 | Service | A Python 3.12 FastAPI service with one in-process asynchronous worker. It runs a cycle at startup and thereafter using `interval_minutes`; a lock prevents overlapping cycles. |
-| Job sources | Greenhouse, Lever, and Ashby public job-board collectors. Each listing receives a stable ID derived from source, board, and source job ID, so later refreshes update rather than duplicate it. |
-| Selection | Configurable role, location, exclusion-title, minimum-score, and explicit-years-of-experience rules. Existing jobs are re-scored whenever the configuration changes. |
+| Job sources | JobSpy (LinkedIn, Indeed, Glassdoor, ZipRecruiter), Playwright AI web scrapers, Tech Feeds (RemoteOK, Arbeitnow), and Greenhouse, Lever, and Ashby public job-board collectors. Each listing receives a stable deterministic 24-character ID so refreshes update rather than duplicate. |
+| Selection & Matching | Resume-driven query generator, multi-factor scoring (seniority fit, stack synergy, experience cap, location rules). Existing jobs are re-scored whenever the configuration changes. |
 | Resume generator | ReportLab PDF generation from verified profile facts: contact details, links, skills, experience, education, projects, and achievements. Relevant skills and bullets are reordered, while original claims remain unchanged. |
 | Application runner | A Playwright/Chromium runner for explicitly tested, host-specific, single-page HTML forms. It supports `fill`, `select`, boolean `check`, and resume `upload` steps. |
 | Review workflow | Jobs move through `discovered`, `filtered`, `needs_profile`, `prepared`, `applying`, `applied`, `needs_review`, `submission_uncertain`, and `error` states as appropriate. Unsubmitted review/error jobs can be explicitly re-queued. |
 | Data and reports | SQLite database in WAL mode for jobs and events; PDF resumes and application screenshots on disk; formatted Excel workbook with filterable Jobs and Activity sheets. Text is stored as text to prevent formula injection in Excel exports. |
 | Local operation | PowerShell setup, startup, status, on-demand run, and Excel-download scripts. The local server only listens on `127.0.0.1`. |
 | Deployment | Dockerfile that installs Chromium and its dependencies, plus Compose deployment with loopback-only port publishing, persistent data volume, read-only configuration mount, restart policy, init process, and shared-memory allocation for the browser. |
-| Testing | Pytest coverage for deduplication, re-scoring, filters, Excel formula safety, truthful resume PDFs, missing adapters, daily limits, and bearer-token API access. |
+| Testing | Pytest coverage for multi-source scrapers, resume matcher, deduplication, re-scoring, filters, Excel formula safety, truthful resume PDFs, missing adapters, daily limits, and bearer-token API access. |
 
 ### API
 
@@ -89,9 +92,32 @@ The last command downloads `jobs.xlsx` into the project folder. The local API bi
 
 Copy `config.example.json` to `config.json`. Fill your profile, roles and locations. Experience objects contain `title`, `company`, `dates`, and `bullets` (list of verified achievements). Education is a list of strings. Resume tailoring reorders existing skills and bullets; it does not train an AI model or invent/rewrite claims.
 
-Add real target company boards, using the company slug in its careers URL:
+Configure scrapers and target company boards in `config.json`:
 
 ```json
+"scrapers": {
+  "jobspy": {
+    "enabled": true,
+    "sites": ["linkedin", "indeed", "glassdoor", "zip_recruiter"],
+    "results_per_role": 10,
+    "country": "India",
+    "hours_old": 72
+  },
+  "tech_feeds": {
+    "enabled": true,
+    "sources": ["remoteok", "arbeitnow"]
+  },
+  "ai_scrapers": {
+    "enabled": true,
+    "targets": [
+      {
+        "name": "Target Portal",
+        "url": "https://example.com/careers",
+        "company": "Example Inc"
+      }
+    ]
+  }
+},
 "boards": [
   {"source": "greenhouse", "slug": "YOUR_COMPANY_BOARD", "company": "Company name"},
   {"source": "lever", "slug": "YOUR_COMPANY_BOARD"},
@@ -99,9 +125,12 @@ Add real target company boards, using the company slug in its careers URL:
 ]
 ```
 
-Boards are deliberately empty in the example. This collects specified companies, not all jobs on the internet. Location matching is substring matching on the source location; remote eligibility and work authorization need your review. Scores are keyword relevance, not ATS scores or eligibility guarantees. It refreshes available listings but does not yet mark disappeared jobs as closed.
+- **JobSpy:** Aggregates live listings from LinkedIn, Indeed, Glassdoor, and ZipRecruiter using targeted queries generated from your target roles and resume skills.
+- **AI Web Scrapers:** Crawls custom JavaScript-rendered career pages using Playwright, extracting job cards and metadata.
+- **Tech Feeds:** Pulls real-time remote developer opportunities from RemoteOK and Arbeitnow.
+- **ATS Boards:** Direct polling for Greenhouse, Lever, and Ashby slugs.
 
-`max_required_years` rejects postings whose descriptions explicitly require more experience than the configured value. It is a conservative text rule, so read every prepared job before applying.
+`max_required_years` rejects postings whose descriptions explicitly require more experience than the configured value (ideal for student/new-grad/intern thresholds). Scores are multi-factor relevance evaluations matching seniority fit, core stack, and project keywords against your verified resume.
 
 ## EC2 deployment (Ubuntu with Docker Engine and Compose installed)
 

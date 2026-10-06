@@ -7,3 +7,4 @@ __pycache__/
 import_profile.py
 .local-token
 jobs.xlsx
+.tmp/

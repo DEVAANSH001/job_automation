@@ -8,6 +8,22 @@
   "auto_submit": false,
   "daily_limit": 5,
   "boards": [],
+  "scrapers": {
+    "jobspy": {
+      "enabled": true,
+      "sites": ["linkedin", "indeed", "glassdoor"],
+      "results_per_role": 10,
+      "country": "India"
+    },
+    "ai_scrapers": {
+      "enabled": true,
+      "targets": []
+    },
+    "tech_feeds": {
+      "enabled": true,
+      "sources": ["remoteok", "arbeitnow"]
+    }
+  },
   "profile": {
     "name": "",
     "email": "",
